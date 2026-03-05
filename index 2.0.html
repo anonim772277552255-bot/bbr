@@ -997,10 +997,10 @@
                         <div class="avatar-option" data-avatar="🦀">🦀</div>
                         <div class="avatar-option" data-avatar="🐙">🐙</div>
                         <div class="avatar-option" data-avatar="🦈">🦈</div>
-                        <div class="avatar-option" data-avatar="⚓">⚓</div>
                         <div class="avatar-option" data-avatar="🗺️">🗺️</div>
                         <div class="avatar-option" data-avatar="💎">💎</div>
                         <div class="avatar-option" data-avatar="🌴">🌴</div>
+                        <div class="avatar-option" data-avatar="🐚">🐚</div>
                         <div class="avatar-upload" onclick="document.getElementById('regAvatarUpload').click()" title="Загрузить свою">+</div>
                     </div>
                     <input type="file" id="regAvatarUpload" accept="image/*" style="display: none;" onchange="handleRegAvatar(event)">
@@ -1178,7 +1178,6 @@
             initAvatarSelector();
             checkSession();
             
-            // Синхронизация
             window.addEventListener('storage', (e) => {
                 if (e.key === STORAGE_KEY) {
                     loadData();
@@ -1275,4 +1274,576 @@
             }
 
             if (appData.users.find(u => u.username === username)) {
-                showError('Такое имя
+                showError('Такое имя уже занято');
+                return;
+            }
+
+            const newUser = {
+                id: Date.now().toString(),
+                username: username,
+                password: password,
+                avatar: customAvatarData || selectedAvatar,
+                isCustomAvatar: !!customAvatarData,
+                created: Date.now(),
+                settings: {
+                    wallpaper: 'none',
+                    themeColor: '#00a884'
+                }
+            };
+
+            appData.users.push(newUser);
+            saveData();
+            
+            currentUser = newUser;
+            userSettings = newUser.settings;
+            saveSession();
+            enterChat();
+        }
+
+        // Вход
+        function login() {
+            const username = document.getElementById('loginUsername').value.trim();
+            const password = document.getElementById('loginPassword').value;
+
+            const user = appData.users.find(u => u.username === username && u.password === password);
+            
+            if (!user) {
+                showError('Неверное имя или пароль');
+                return;
+            }
+
+            currentUser = user;
+            userSettings = user.settings || { wallpaper: 'none', themeColor: '#00a884' };
+            saveSession();
+            enterChat();
+        }
+
+        function saveSession() {
+            localStorage.setItem('beachbuggy_session', JSON.stringify({
+                userId: currentUser.id,
+                timestamp: Date.now()
+            }));
+        }
+
+        function checkSession() {
+            const session = localStorage.getItem('beachbuggy_session');
+            if (session) {
+                const data = JSON.parse(session);
+                const user = appData.users.find(u => u.id === data.userId);
+                if (user) {
+                    currentUser = user;
+                    userSettings = user.settings || { wallpaper: 'none', themeColor: '#00a884' };
+                    enterChat();
+                }
+            }
+        }
+
+        // Вход в чат
+        function enterChat() {
+            document.getElementById('authScreen').style.display = 'none';
+            document.getElementById('chatContainer').classList.add('active');
+            
+            applySettings();
+            updateHeaderAvatar();
+            renderMessages();
+            scrollToBottom();
+            updateOnlineStatus();
+        }
+
+        function updateHeaderAvatar() {
+            const avatarEl = document.getElementById('headerAvatarIcon');
+            if (currentUser.isCustomAvatar) {
+                avatarEl.innerHTML = '<img src="' + currentUser.avatar + '" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">';
+            } else {
+                avatarEl.textContent = currentUser.avatar;
+            }
+        }
+
+        // Настройки
+        function applySettings() {
+            const msgsArea = document.getElementById('messagesArea');
+            const wallpaper = userSettings.wallpaper;
+            
+            if (wallpaper === 'none') {
+                msgsArea.style.background = 'var(--bg-dark)';
+            } else if (wallpaper.startsWith('data:')) {
+                msgsArea.style.background = 'url(' + wallpaper + ') center/cover fixed';
+            } else {
+                const gradients = {
+                    gradient1: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                    gradient2: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+                    gradient3: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
+                    gradient4: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
+                    dark1: '#1a1a2e'
+                };
+                msgsArea.style.background = gradients[wallpaper] || 'var(--bg-dark)';
+            }
+
+            const color = userSettings.themeColor || '#00a884';
+            document.documentElement.style.setProperty('--accent', color);
+            document.documentElement.style.setProperty('--accent-hover', adjustColor(color, 20));
+        }
+
+        function adjustColor(color, amount) {
+            const num = parseInt(color.replace('#', ''), 16);
+            const r = Math.min(255, (num >> 16) + amount);
+            const g = Math.min(255, ((num >> 8) & 0x00FF) + amount);
+            const b = Math.min(255, (num & 0x0000FF) + amount);
+            return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+        }
+
+        function showSettings() {
+            tempSettings = { ...userSettings };
+            
+            document.querySelectorAll('.wallpaper-option').forEach(el => {
+                el.classList.toggle('selected', el.dataset.wallpaper === userSettings.wallpaper);
+            });
+            
+            document.querySelectorAll('.color-option').forEach(el => {
+                el.classList.toggle('selected', el.dataset.color === userSettings.themeColor);
+            });
+            
+            document.getElementById('settingsModal').classList.add('active');
+        }
+
+        function closeSettings() {
+            document.getElementById('settingsModal').classList.remove('active');
+        }
+
+        function saveSettings() {
+            userSettings = tempSettings;
+            currentUser.settings = userSettings;
+            saveData();
+            applySettings();
+            closeSettings();
+        }
+
+        document.querySelectorAll('.wallpaper-option').forEach(el => {
+            el.addEventListener('click', () => {
+                document.querySelectorAll('.wallpaper-option').forEach(w => w.classList.remove('selected'));
+                el.classList.add('selected');
+                tempSettings.wallpaper = el.dataset.wallpaper;
+            });
+        });
+
+        function handleWallpaperUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                tempSettings.wallpaper = e.target.result;
+                document.querySelectorAll('.wallpaper-option').forEach(w => w.classList.remove('selected'));
+            };
+            reader.readAsDataURL(file);
+        }
+
+        document.querySelectorAll('.color-option').forEach(el => {
+            el.addEventListener('click', () => {
+                document.querySelectorAll('.color-option').forEach(c => c.classList.remove('selected'));
+                el.classList.add('selected');
+                tempSettings.themeColor = el.dataset.color;
+            });
+        });
+
+        // Онлайн статус
+        function updateOnlineStatus() {
+            if (!currentUser) return;
+            
+            const now = Date.now();
+            appData.sessions[currentUser.id] = {
+                lastSeen: now,
+                userId: currentUser.id
+            };
+            
+            Object.keys(appData.sessions).forEach(id => {
+                if (now - appData.sessions[id].lastSeen > 30000) {
+                    delete appData.sessions[id];
+                }
+            });
+            
+            saveData();
+            updateOnlineCount();
+        }
+
+        function updateOnlineCount() {
+            const count = Object.keys(appData.sessions).length;
+            document.getElementById('onlineCount').textContent = '● ' + count + ' онлайн';
+        }
+
+        // Отправка сообщения
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const text = input.value.trim();
+            
+            if (!text && !currentAttachment) return;
+
+            const message = {
+                id: Date.now().toString(),
+                userId: currentUser.id,
+                username: currentUser.username,
+                avatar: currentUser.avatar,
+                isCustomAvatar: currentUser.isCustomAvatar,
+                text: text || getAttachmentText(),
+                attachment: currentAttachment,
+                timestamp: Date.now(),
+                readBy: [currentUser.id]
+            };
+
+            appData.messages.push(message);
+            saveData();
+            
+            input.value = '';
+            input.rows = 1;
+            clearAttachment();
+            document.getElementById('sendBtn').disabled = true;
+            
+            renderMessages();
+            scrollToBottom();
+        }
+
+        function getAttachmentText() {
+            if (!currentAttachment) return '';
+            if (currentAttachment.type === 'image') return '📷 Фото';
+            if (currentAttachment.type === 'file') return '📎 Файл';
+            if (currentAttachment.type === 'link') return '🔗 Ссылка';
+            return '';
+        }
+
+        // Рендер сообщений
+        function renderMessages() {
+            const area = document.getElementById('messagesArea');
+            if (!appData.messages.length) {
+                area.innerHTML = '<div style="text-align: center; color: var(--text-secondary); margin-top: 50px; text-shadow: 0 1px 2px rgba(0,0,0,0.8);">Нет сообщений. Начни общение!</div>';
+                return;
+            }
+
+            let html = '';
+            let lastDate = null;
+
+            appData.messages.forEach(msg => {
+                const msgDate = new Date(msg.timestamp).toLocaleDateString('ru-RU');
+                if (msgDate !== lastDate) {
+                    html += '<div class="date-divider"><span class="date-label" style="color: var(--text-secondary);">' + formatDate(msg.timestamp) + '</span></div>';
+                    lastDate = msgDate;
+                }
+
+                const isOwn = msg.userId === currentUser.id;
+                const isRead = msg.readBy && msg.readBy.length > 1;
+
+                if (!isOwn && (!msg.readBy || !msg.readBy.includes(currentUser.id))) {
+                    if (!msg.readBy) msg.readBy = [];
+                    msg.readBy.push(currentUser.id);
+                    saveData();
+                }
+
+                const avatarHtml = msg.isCustomAvatar 
+                    ? '<img src="' + msg.avatar + '" style="width:100%;height:100%;object-fit:cover;">' 
+                    : msg.avatar;
+
+                html += '<div class="message ' + (isOwn ? 'own' : '') + '">' +
+                    '<div class="message-avatar">' + avatarHtml + '</div>' +
+                    '<div class="message-content">' +
+                        '<div class="message-bubble">' +
+                            (isOwn ? '' : '<div class="message-sender">' + msg.username + '</div>') +
+                            '<div class="message-text">' + escapeHtml(msg.text) + '</div>' +
+                            renderAttachment(msg.attachment) +
+                        '</div>' +
+                        '<div class="message-meta">' +
+                            '<span>' + formatTime(msg.timestamp) + '</span>' +
+                            (isOwn ? '<span class="read-status ' + (isRead ? 'read' : '') + '">' + (isRead ? '✓✓' : '✓') + '</span>' : '') +
+                        '</div>' +
+                    '</div>' +
+                '</div>';
+            });
+
+            area.innerHTML = html;
+        }
+
+        function renderAttachment(att) {
+            if (!att) return '';
+            if (att.type === 'image') {
+                return '<img src="' + att.data + '" class="message-image" onclick="openImageModal(\'' + att.data + '\')">';
+            }
+            if (att.type === 'file') {
+                return '<div class="message-file" onclick="downloadFile(\'' + att.data + '\', \'' + att.name + '\')">' +
+                    '<div class="file-icon">📄</div>' +
+                    '<div class="file-info">' +
+                        '<div class="file-name">' + att.name + '</div>' +
+                        '<div class="file-size">' + att.size + '</div>' +
+                    '</div>' +
+                '</div>';
+            }
+            if (att.type === 'link') {
+                return '<a href="' + att.url + '" target="_blank" class="message-link"><span>🔗</span> <span>' + att.url + '</span></a>';
+            }
+            return '';
+        }
+
+        // Прикрепления
+        function toggleAttachMenu() {
+            document.getElementById('attachMenu').classList.toggle('active');
+            document.getElementById('emojiMenu').classList.remove('active');
+        }
+
+        function toggleEmojiMenu() {
+            document.getElementById('emojiMenu').classList.toggle('active');
+            document.getElementById('attachMenu').classList.remove('active');
+        }
+
+        function insertEmoji(emoji) {
+            const input = document.getElementById('messageInput');
+            input.value += emoji;
+            input.focus();
+            checkSendButton();
+            document.getElementById('emojiMenu').classList.remove('active');
+        }
+
+        function selectImage() {
+            document.getElementById('imageInput').click();
+            toggleAttachMenu();
+        }
+
+        function handleImageSelect(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                currentAttachment = { type: 'image', data: ev.target.result, name: file.name };
+                showPreview('image', ev.target.result);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function selectFile() {
+            document.getElementById('fileInput').click();
+            toggleAttachMenu();
+        }
+
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                currentAttachment = { 
+                    type: 'file', 
+                    data: ev.target.result, 
+                    name: file.name,
+                    size: formatFileSize(file.size)
+                };
+                showPreview('file', file.name);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function addLink() {
+            const url = prompt('Введи ссылку (с https://):');
+            if (!url) return;
+            currentAttachment = { type: 'link', url: url };
+            showPreview('link', url);
+            toggleAttachMenu();
+        }
+
+        function showPreview(type, content) {
+            const preview = document.getElementById('inputPreview');
+            const container = document.getElementById('previewContent');
+            preview.classList.add('active');
+            
+            if (type === 'image') {
+                container.innerHTML = '<img src="' + content + '" class="preview-image">';
+            } else {
+                container.innerHTML = '<span>' + (type === 'file' ? '📄' : '🔗') + ' ' + content + '</span>';
+            }
+            document.getElementById('sendBtn').disabled = false;
+        }
+
+        function clearAttachment() {
+            currentAttachment = null;
+            document.getElementById('inputPreview').classList.remove('active');
+            document.getElementById('imageInput').value = '';
+            document.getElementById('fileInput').value = '';
+            checkSendButton();
+        }
+
+        // Профиль
+        function showProfile() {
+            const avatarEl = document.getElementById('profileAvatar');
+            if (currentUser.isCustomAvatar) {
+                avatarEl.innerHTML = '<img src="' + currentUser.avatar + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">';
+            } else {
+                avatarEl.textContent = currentUser.avatar;
+            }
+            document.getElementById('profileName').textContent = currentUser.username;
+            document.getElementById('profileModal').classList.add('active');
+        }
+
+        function closeProfile() {
+            document.getElementById('profileModal').classList.remove('active');
+        }
+
+        // Экспорт/Импорт
+        function showExportModal() {
+            document.getElementById('dataModalTitle').textContent = 'Экспорт данных';
+            document.getElementById('dataTextarea').value = JSON.stringify(appData);
+            document.getElementById('dataActionBtn').textContent = 'Копировать';
+            document.getElementById('dataActionBtn').onclick = copyData;
+            document.getElementById('dataModal').classList.add('active');
+        }
+
+        function showImportModal() {
+            document.getElementById('dataModalTitle').textContent = 'Импорт данных';
+            document.getElementById('dataTextarea').value = '';
+            document.getElementById('dataTextarea').placeholder = 'Вставь сюда код данных...';
+            document.getElementById('dataTextarea').readOnly = false;
+            document.getElementById('dataActionBtn').textContent = 'Импортировать';
+            document.getElementById('dataActionBtn').onclick = importData;
+            document.getElementById('dataModal').classList.add('active');
+        }
+
+        function closeDataModal() {
+            document.getElementById('dataModal').classList.remove('active');
+            document.getElementById('dataTextarea').readOnly = true;
+        }
+
+        function copyData() {
+            const textarea = document.getElementById('dataTextarea');
+            textarea.select();
+            document.execCommand('copy');
+            alert('Данные скопированы! Сохрани их и вставь на другом устройстве.');
+        }
+
+        function importData() {
+            try {
+                const data = JSON.parse(document.getElementById('dataTextarea').value);
+                if (data.users && data.messages) {
+                    appData = data;
+                    saveData();
+                    alert('Данные импортированы! Перезагрузи страницу.');
+                    location.reload();
+                } else {
+                    alert('Неверный формат данных');
+                }
+            } catch (e) {
+                alert('Ошибка: неверный код данных');
+            }
+        }
+
+        // Выход
+        function logout() {
+            if (confirm('Выйти из аккаунта?')) {
+                delete appData.sessions[currentUser.id];
+                saveData();
+                localStorage.removeItem('beachbuggy_session');
+                location.reload();
+            }
+        }
+
+        // Вспомогательные функции
+        function autoResize(textarea) {
+            textarea.rows = 1;
+            textarea.rows = Math.min(5, Math.ceil(textarea.scrollHeight / 24));
+            checkSendButton();
+        }
+
+        function checkSendButton() {
+            const text = document.getElementById('messageInput').value.trim();
+            document.getElementById('sendBtn').disabled = !text && !currentAttachment;
+        }
+
+        function handleKeyPress(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        }
+
+        function scrollToBottom() {
+            const area = document.getElementById('messagesArea');
+            area.scrollTop = area.scrollHeight;
+        }
+
+        function openImageModal(src) {
+            document.getElementById('modalImage').src = src;
+            document.getElementById('imageModal').classList.add('active');
+        }
+
+        function closeImageModal() {
+            document.getElementById('imageModal').classList.remove('active');
+        }
+
+        function downloadFile(data, name) {
+            const a = document.createElement('a');
+            a.href = data;
+            a.download = name;
+            a.click();
+        }
+
+        function showError(text) {
+            const el = document.getElementById('errorMsg');
+            el.textContent = text;
+            el.classList.add('show');
+        }
+
+        function hideError() {
+            document.getElementById('errorMsg').classList.remove('show');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML.replace(/\n/g, '<br>');
+        }
+
+        function formatTime(ts) {
+            return new Date(ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+        }
+
+        function formatDate(ts) {
+            const d = new Date(ts);
+            const today = new Date();
+            const yesterday = new Date(today);
+            yesterday.setDate(yesterday.getDate() - 1);
+            
+            if (d.toDateString() === today.toDateString()) return 'Сегодня';
+            if (d.toDateString() === yesterday.toDateString()) return 'Вчера';
+            return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 10) / 10 + ' ' + sizes[i];
+        }
+
+        // Закрытие меню по клику вне
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.attach-btn') && !e.target.closest('.attach-menu')) {
+                document.getElementById('attachMenu').classList.remove('active');
+            }
+            if (!e.target.closest('.emoji-btn') && !e.target.closest('.emoji-menu')) {
+                document.getElementById('emojiMenu').classList.remove('active');
+            }
+        });
+
+        // Вставка из буфера
+        document.addEventListener('paste', (e) => {
+            const items = e.clipboardData.items;
+            for (let item of items) {
+                if (item.type.indexOf('image') !== -1) {
+                    const blob = item.getAsFile();
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                        currentAttachment = { type: 'image', data: ev.target.result, name: 'image.png' };
+                        showPreview('image', ev.target.result);
+                    };
+                    reader.readAsDataURL(blob);
+                }
+            }
+        });
+    </script>
+</body>
+</html>
