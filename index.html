@@ -1142,8 +1142,10 @@
         const CHAT_ID = '-1003763026406';
         const INVITE_CODE = 'VIPchat';
         
-        // ID закреплённого сообщения с базой данных (устанавливается автоматически)
+        // ID закреплённого сообщения с базой данных пользователей
         let pinnedMessageId = localStorage.getItem('bb_pinned_msg_id') || null;
+        // ID закреплённого сообщения с историей чата
+        let chatHistoryMessageId = localStorage.getItem('bb_chat_history_msg_id') || null;
         
         const AVATAR_URLS = [
             'https://api.dicebear.com/7.x/avataaars/svg?seed=Felix&backgroundColor=b6e3f4',
@@ -1186,7 +1188,7 @@
 
         // ==================== TELEGRAM ХРАНИЛИЩЕ ====================
         
-        // Создаём или обновляем закреплённое сообщение с базой
+        // Создаём или обновляем закреплённое сообщение с базой пользователей
         async function syncUsersToTelegram() {
             try {
                 const data = {
@@ -1194,17 +1196,13 @@
                     lastSync: Date.now()
                 };
                 
-                // Сжимаем данные (base64)
                 const compressed = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
-                
-                // Telegram ограничение 4096 символов, разбиваем если нужно
                 const maxLength = 4000;
                 const chunks = [];
                 for (let i = 0; i < compressed.length; i += maxLength) {
                     chunks.push(compressed.substring(i, i + maxLength));
                 }
                 
-                // Удаляем старое закреплённое сообщение если есть
                 if (pinnedMessageId) {
                     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/unpinChatMessage`, {
                         method: 'POST',
@@ -1216,7 +1214,6 @@
                     });
                 }
                 
-                // Отправляем первую часть и закрепляем
                 const firstChunk = `[BBDB:v1|${chunks.length}|1]${chunks[0]}`;
                 const sendResult = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                     method: 'POST',
@@ -1232,7 +1229,6 @@
                 
                 const messageId = sendData.result.message_id;
                 
-                // Закрепляем
                 await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1243,7 +1239,6 @@
                     })
                 });
                 
-                // Отправляем остальные части (не закреплённые, но с метками)
                 for (let i = 1; i < chunks.length; i++) {
                     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                         method: 'POST',
@@ -1261,7 +1256,7 @@
                 
                 return true;
             } catch (e) {
-                console.error('Sync to Telegram failed:', e);
+                console.error('Sync users to Telegram failed:', e);
                 return false;
             }
         }
@@ -1269,41 +1264,34 @@
         // Загружаем пользователей из закреплённого сообщения
         async function syncUsersFromTelegram() {
             try {
-                // Получаем информацию о чате
                 const chatResult = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getChat?chat_id=${CHAT_ID}`);
                 const chatData = await chatResult.json();
                 
                 if (!chatData.ok || !chatData.result.pinned_message) {
-                    // Нет закреплённого сообщения, используем localStorage
                     return false;
                 }
                 
                 const pinnedMsg = chatData.result.pinned_message;
                 
-                // Проверяем формат
                 if (!pinnedMsg.text || !pinnedMsg.text.startsWith('[BBDB:')) {
                     return false;
                 }
                 
-                // Парсим метаданные
                 const metaMatch = pinnedMsg.text.match(/\[BBDB:v(\d+)\|(\d+)\|(\d+)\]/);
                 if (!metaMatch) return false;
                 
                 const totalChunks = parseInt(metaMatch[2]);
                 const messageId = pinnedMsg.message_id;
                 
-                // Собираем все части
                 let fullData = pinnedMsg.text.replace(metaMatch[0], '');
                 
                 if (totalChunks > 1) {
-                    // Получаем историю сообщений для поиска остальных частей
                     const historyResult = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?limit=100`);
                     const historyData = await historyResult.json();
                     
                     if (historyData.ok) {
-                        // Ищем части в обратном порядке (новые сначала)
                         const parts = new Array(totalChunks);
-                        parts[0] = fullData; // Первая часть уже есть
+                        parts[0] = fullData;
                         
                         for (const update of historyData.result.reverse()) {
                             if (!update.message || !update.message.text) continue;
@@ -1321,7 +1309,6 @@
                     }
                 }
                 
-                // Распаковываем
                 const decompressed = decodeURIComponent(escape(atob(fullData)));
                 const data = JSON.parse(decompressed);
                 
@@ -1335,7 +1322,178 @@
                 
                 return false;
             } catch (e) {
-                console.error('Sync from Telegram failed:', e);
+                console.error('Sync users from Telegram failed:', e);
+                return false;
+            }
+        }
+
+        // Синхронизация истории сообщений в отдельное закреплённое сообщение
+        async function syncMessagesToTelegram() {
+            try {
+                // Ограничиваем количество сообщений для хранения (последние 100)
+                const messagesToSync = messages.slice(-100);
+                
+                const data = {
+                    messages: messagesToSync,
+                    lastSync: Date.now()
+                };
+                
+                const compressed = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+                const maxLength = 4000;
+                const chunks = [];
+                for (let i = 0; i < compressed.length; i += maxLength) {
+                    chunks.push(compressed.substring(i, i + maxLength));
+                }
+                
+                // Открепляем старое сообщение с историей если есть
+                if (chatHistoryMessageId) {
+                    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/unpinChatMessage`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            chat_id: CHAT_ID,
+                            message_id: parseInt(chatHistoryMessageId)
+                        })
+                    });
+                }
+                
+                const firstChunk = `[BBMSG:v1|${chunks.length}|1]${chunks[0]}`;
+                const sendResult = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: CHAT_ID,
+                        text: firstChunk
+                    })
+                });
+                
+                const sendData = await sendResult.json();
+                if (!sendData.ok) throw new Error('Failed to send messages');
+                
+                const messageId = sendData.result.message_id;
+                
+                // Закрепляем сообщение с историей
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: CHAT_ID,
+                        message_id: messageId,
+                        disable_notification: true
+                    })
+                });
+                
+                // Отправляем остальные части
+                for (let i = 1; i < chunks.length; i++) {
+                    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            chat_id: CHAT_ID,
+                            text: `[BBMSG:v1|${chunks.length}|${i+1}]${chunks[i]}`
+                        })
+                    });
+                    await new Promise(r => setTimeout(r, 200));
+                }
+                
+                chatHistoryMessageId = messageId.toString();
+                localStorage.setItem('bb_chat_history_msg_id', chatHistoryMessageId);
+                
+                return true;
+            } catch (e) {
+                console.error('Sync messages to Telegram failed:', e);
+                return false;
+            }
+        }
+
+        // Загружаем историю сообщений из Telegram
+        async function syncMessagesFromTelegram() {
+            try {
+                const chatResult = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getChat?chat_id=${CHAT_ID}`);
+                const chatData = await chatResult.json();
+                
+                if (!chatData.ok) return false;
+                
+                // Ищем второе закреплённое сообщение (с историей)
+                // Telegram позволяет закрепить только одно, но мы можем искать по меткам
+                // Или получаем все закреплённые сообщения через getUpdates
+                
+                // Получаем последние обновления для поиска сообщений с историей
+                const updatesResult = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?limit=100`);
+                const updatesData = await updatesResult.json();
+                
+                let historyMessage = null;
+                
+                // Сначала проверяем текущее закреплённое
+                if (chatData.result.pinned_message && 
+                    chatData.result.pinned_message.text && 
+                    chatData.result.pinned_message.text.startsWith('[BBMSG:')) {
+                    historyMessage = chatData.result.pinned_message;
+                }
+                
+                // Если не нашли, ищем в обновлениях
+                if (!historyMessage && updatesData.ok) {
+                    for (const update of updatesData.result.reverse()) {
+                        if (update.message && update.message.text && 
+                            update.message.text.startsWith('[BBMSG:')) {
+                            historyMessage = update.message;
+                            break;
+                        }
+                    }
+                }
+                
+                if (!historyMessage) return false;
+                
+                const metaMatch = historyMessage.text.match(/\[BBMSG:v(\d+)\|(\d+)\|(\d+)\]/);
+                if (!metaMatch) return false;
+                
+                const totalChunks = parseInt(metaMatch[2]);
+                let fullData = historyMessage.text.replace(metaMatch[0], '');
+                
+                if (totalChunks > 1 && updatesData.ok) {
+                    const parts = new Array(totalChunks);
+                    parts[0] = fullData;
+                    
+                    for (const update of updatesData.result.reverse()) {
+                        if (!update.message || !update.message.text) continue;
+                        const msg = update.message.text;
+                        const partMatch = msg.match(/\[BBMSG:v\d+\|(\d+)\|(\d+)\]/);
+                        if (partMatch && parseInt(partMatch[1]) === totalChunks) {
+                            const partNum = parseInt(partMatch[2]) - 1;
+                            if (!parts[partNum]) {
+                                parts[partNum] = msg.replace(partMatch[0], '');
+                            }
+                        }
+                    }
+                    
+                    fullData = parts.join('');
+                }
+                
+                const decompressed = decodeURIComponent(escape(atob(fullData)));
+                const data = JSON.parse(decompressed);
+                
+                if (data.messages && Array.isArray(data.messages)) {
+                    // Объединяем с локальными сообщениями, избегая дубликатов
+                    const existingIds = new Set(messages.map(m => m.id));
+                    const newMessages = data.messages.filter(m => !existingIds.has(m.id));
+                    
+                    if (newMessages.length > 0) {
+                        messages = [...messages, ...newMessages].sort((a, b) => a.timestamp - b.timestamp);
+                        // Ограничиваем до 100 сообщений
+                        if (messages.length > 100) {
+                            messages = messages.slice(-100);
+                        }
+                        localStorage.setItem('messages', JSON.stringify(messages));
+                    }
+                    
+                    chatHistoryMessageId = historyMessage.message_id.toString();
+                    localStorage.setItem('bb_chat_history_msg_id', chatHistoryMessageId);
+                    return true;
+                }
+                
+                return false;
+            } catch (e) {
+                console.error('Sync messages from Telegram failed:', e);
                 return false;
             }
         }
@@ -1345,17 +1503,19 @@
         document.addEventListener('DOMContentLoaded', async () => {
             updateConnectionStatus('syncing', 'Синхронизация...');
             
-            // Пробуем загрузить из Telegram
-            const telegramLoaded = await syncUsersFromTelegram();
-            
-            if (!telegramLoaded) {
-                // Fallback на localStorage
+            // Загружаем пользователей
+            const telegramUsersLoaded = await syncUsersFromTelegram();
+            if (!telegramUsersLoaded) {
                 const savedUsers = localStorage.getItem('users');
                 if (savedUsers) users = JSON.parse(savedUsers);
             }
             
+            // Загружаем сообщения из localStorage (временно)
             const savedMessages = localStorage.getItem('messages');
             if (savedMessages) messages = JSON.parse(savedMessages);
+            
+            // Загружаем историю из Telegram
+            await syncMessagesFromTelegram();
             
             // Проверяем сессию
             const session = localStorage.getItem('currentSession');
@@ -1476,13 +1636,28 @@
                 
                 const updates = await getTelegramMessages();
                 
+                let hasNewMessages = false;
+                
                 updates.forEach(update => {
                     if (update.message && update.message.text) {
                         // Пропускаем служебные сообщения
-                        if (update.message.text.startsWith('[BBDB:')) return;
+                        if (update.message.text.startsWith('[BBDB:') || 
+                            update.message.text.startsWith('[BBMSG:')) return;
                         processTelegramMessage(update.message);
+                        hasNewMessages = true;
                     }
                 });
+                
+                // Если были новые сообщения, синхронизируем историю
+                if (hasNewMessages) {
+                    await syncMessagesToTelegram();
+                }
+                
+                // Периодически проверяем историю из Telegram (каждые 30 секунд)
+                if (Date.now() % 30000 < 3500) {
+                    await syncMessagesFromTelegram();
+                    renderMessages();
+                }
             }, 3000);
         }
 
@@ -1587,7 +1762,6 @@
             btn.textContent = 'Синхронизация...';
             updateConnectionStatus('syncing', 'Синхронизация...');
             
-            // Обязательно синхронизируем перед проверкой
             await syncUsersFromTelegram();
             
             if (inviteCode !== INVITE_CODE) {
@@ -1634,7 +1808,6 @@
             users.push(newUser);
             localStorage.setItem('users', JSON.stringify(users));
             
-            // Синхронизируем с Telegram
             btn.textContent = 'Сохранение...';
             const synced = await syncUsersToTelegram();
             
@@ -1643,7 +1816,6 @@
             
             localStorage.setItem('currentSession', JSON.stringify({ userId: newUser.id }));
             
-            // Отправляем в Telegram
             const tgResult = await sendTelegramMessage(`👋 <b>${username}</b> присоединился к чату!`);
             
             btn.disabled = false;
@@ -1668,14 +1840,15 @@
             btn.textContent = 'Синхронизация...';
             updateConnectionStatus('syncing', 'Синхронизация...');
             
-            // Обязательно синхронизируем перед входом
             const synced = await syncUsersFromTelegram();
             
-            // Если не удалось синхронизироваться, используем локальные данные
             if (!synced) {
                 const savedUsers = localStorage.getItem('users');
                 if (savedUsers) users = JSON.parse(savedUsers);
             }
+            
+            // Загружаем историю сообщений при входе
+            await syncMessagesFromTelegram();
             
             const user = users.find(u => u.username === username && u.password === password);
             
@@ -1715,7 +1888,6 @@
             const telegramText = `${currentUser.username}: ${text}`;
             const result = await sendTelegramMessage(telegramText);
             
-            // Добавляем локально даже если не удалось отправить в Telegram
             const message = {
                 id: result ? result.result.message_id.toString() : Date.now().toString(),
                 userId: currentUser.id,
@@ -1729,6 +1901,9 @@
             
             messages.push(message);
             saveMessages();
+            
+            // Синхронизируем историю сразу после отправки
+            await syncMessagesToTelegram();
             
             input.value = '';
             input.rows = 1;
@@ -1841,7 +2016,6 @@
             if (userIndex !== -1) {
                 users[userIndex].settings = userSettings;
                 localStorage.setItem('users', JSON.stringify(users));
-                // Синхронизируем с Telegram
                 await syncUsersToTelegram();
             }
             
@@ -2024,7 +2198,6 @@
             if (userIndex !== -1) {
                 users[userIndex] = currentUser;
                 localStorage.setItem('users', JSON.stringify(users));
-                // Синхронизируем с Telegram
                 await syncUsersToTelegram();
             }
             
@@ -2036,6 +2209,9 @@
                 }
             });
             saveMessages();
+            
+            // Синхронизируем историю после изменения профиля
+            await syncMessagesToTelegram();
             
             if (oldUsername !== newUsername) {
                 await sendTelegramMessage(`📝 <b>${oldUsername}</b> сменил имя на <b>${newUsername}</b>`);
@@ -2063,11 +2239,11 @@
             
             users = users.filter(u => u.id !== currentUser.id);
             localStorage.setItem('users', JSON.stringify(users));
-            // Синхронизируем с Telegram
             await syncUsersToTelegram();
             
             messages = messages.filter(m => m.userId !== currentUser.id);
             saveMessages();
+            await syncMessagesToTelegram();
             
             localStorage.removeItem('currentSession');
             
