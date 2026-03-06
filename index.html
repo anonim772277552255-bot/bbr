@@ -19,7 +19,6 @@
             --accent-hover: #00c49a;
             --border: #2f2f2f;
             --danger: #ef4444;
-            --link: #53bdeb;
             --online-green: #4bb34b;
         }
 
@@ -341,6 +340,11 @@
         .connection-status.error {
             background: rgba(239, 68, 68, 0.2);
             color: var(--danger);
+        }
+
+        .connection-status.syncing {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
         }
 
         .header-actions {
@@ -950,7 +954,7 @@
                     <label class="form-label">Пароль</label>
                     <input type="password" class="form-input" id="loginPassword" placeholder="Введи пароль" autocomplete="current-password">
                 </div>
-                <button class="auth-btn" onclick="login()">Войти в чат</button>
+                <button class="auth-btn" onclick="login()" id="loginBtn">Войти в чат</button>
             </div>
 
             <div id="registerForm" style="display: none;">
@@ -971,7 +975,7 @@
                     <div class="avatar-selector" id="avatarSelector"></div>
                     <input type="file" id="regAvatarUpload" accept="image/*" style="display: none;" onchange="handleRegAvatar(event)">
                 </div>
-                <button class="auth-btn" onclick="register()">Создать аккаунт</button>
+                <button class="auth-btn" onclick="register()" id="registerBtn">Создать аккаунт</button>
             </div>
 
             <div class="error-msg" id="errorMsg"></div>
@@ -1138,9 +1142,8 @@
         const CHAT_ID = '-1003763026406';
         const INVITE_CODE = 'VIPchat';
         
-        // Ключ для хранения базы пользователей в Telegram
-        const USERS_STORAGE_KEY = 'BB_USERS_DB';
-        const MESSAGES_STORAGE_KEY = 'BB_MESSAGES_DB';
+        // ID закреплённого сообщения с базой данных (устанавливается автоматически)
+        let pinnedMessageId = localStorage.getItem('bb_pinned_msg_id') || null;
         
         const AVATAR_URLS = [
             'https://api.dicebear.com/7.x/avataaars/svg?seed=Felix&backgroundColor=b6e3f4',
@@ -1179,69 +1182,160 @@
         let messages = [];
         let users = [];
         let pollingInterval = null;
-        let isSyncing = false;
+        let isOnline = false;
 
-        // ==================== СИНХРОНИЗАЦИЯ ЧЕРЕЗ TELEGRAM ====================
+        // ==================== TELEGRAM ХРАНИЛИЩЕ ====================
         
-        // Отправляем системное сообщение с данными (скрытое)
+        // Создаём или обновляем закреплённое сообщение с базой
         async function syncUsersToTelegram() {
-            if (isSyncing) return;
-            isSyncing = true;
-            
             try {
-                const usersData = btoa(unescape(encodeURIComponent(JSON.stringify(users))));
-                // Отправляем в несколько сообщений если нужно (Telegram лимит 4096)
-                const chunks = usersData.match(/.{1,4000}/g) || [];
+                const data = {
+                    users: users,
+                    lastSync: Date.now()
+                };
                 
-                for (let i = 0; i < chunks.length; i++) {
-                    await sendTelegramMessage(`[SYNC_USERS_${i}]${chunks[i]}`);
-                    await new Promise(r => setTimeout(r, 500)); // Задержка между сообщениями
+                // Сжимаем данные (base64)
+                const compressed = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+                
+                // Telegram ограничение 4096 символов, разбиваем если нужно
+                const maxLength = 4000;
+                const chunks = [];
+                for (let i = 0; i < compressed.length; i += maxLength) {
+                    chunks.push(compressed.substring(i, i + maxLength));
                 }
+                
+                // Удаляем старое закреплённое сообщение если есть
+                if (pinnedMessageId) {
+                    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/unpinChatMessage`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            chat_id: CHAT_ID,
+                            message_id: parseInt(pinnedMessageId)
+                        })
+                    });
+                }
+                
+                // Отправляем первую часть и закрепляем
+                const firstChunk = `[BBDB:v1|${chunks.length}|1]${chunks[0]}`;
+                const sendResult = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: CHAT_ID,
+                        text: firstChunk
+                    })
+                });
+                
+                const sendData = await sendResult.json();
+                if (!sendData.ok) throw new Error('Failed to send');
+                
+                const messageId = sendData.result.message_id;
+                
+                // Закрепляем
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: CHAT_ID,
+                        message_id: messageId,
+                        disable_notification: true
+                    })
+                });
+                
+                // Отправляем остальные части (не закреплённые, но с метками)
+                for (let i = 1; i < chunks.length; i++) {
+                    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            chat_id: CHAT_ID,
+                            text: `[BBDB:v1|${chunks.length}|${i+1}]${chunks[i]}`
+                        })
+                    });
+                    await new Promise(r => setTimeout(r, 200));
+                }
+                
+                pinnedMessageId = messageId.toString();
+                localStorage.setItem('bb_pinned_msg_id', pinnedMessageId);
+                
+                return true;
             } catch (e) {
-                console.error('Sync error:', e);
-            } finally {
-                isSyncing = false;
+                console.error('Sync to Telegram failed:', e);
+                return false;
             }
         }
 
-        // Загружаем пользователей из Telegram (парсим последние системные сообщения)
-        async function loadUsersFromTelegram() {
+        // Загружаем пользователей из закреплённого сообщения
+        async function syncUsersFromTelegram() {
             try {
-                const url = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?limit=100`;
-                const response = await fetch(url);
-                const data = await response.json();
+                // Получаем информацию о чате
+                const chatResult = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getChat?chat_id=${CHAT_ID}`);
+                const chatData = await chatResult.json();
                 
-                if (!data.ok) return false;
+                if (!chatData.ok || !chatData.result.pinned_message) {
+                    // Нет закреплённого сообщения, используем localStorage
+                    return false;
+                }
                 
-                // Ищем последнее сообщение с синхронизацией
-                const syncMessages = data.result
-                    .filter(u => u.message && u.message.text && u.message.text.startsWith('[SYNC_USERS_'))
-                    .sort((a, b) => b.update_id - a.update_id);
+                const pinnedMsg = chatData.result.pinned_message;
                 
-                if (syncMessages.length === 0) return false;
+                // Проверяем формат
+                if (!pinnedMsg.text || !pinnedMsg.text.startsWith('[BBDB:')) {
+                    return false;
+                }
+                
+                // Парсим метаданные
+                const metaMatch = pinnedMsg.text.match(/\[BBDB:v(\d+)\|(\d+)\|(\d+)\]/);
+                if (!metaMatch) return false;
+                
+                const totalChunks = parseInt(metaMatch[2]);
+                const messageId = pinnedMsg.message_id;
                 
                 // Собираем все части
-                const parts = [];
-                let i = 0;
-                while (true) {
-                    const part = syncMessages.find(m => m.message.text.startsWith(`[SYNC_USERS_${i}]`));
-                    if (!part) break;
-                    parts.push(part.message.text.replace(`[SYNC_USERS_${i}]`, ''));
-                    i++;
-                }
+                let fullData = pinnedMsg.text.replace(metaMatch[0], '');
                 
-                if (parts.length > 0) {
-                    const fullData = parts.join('');
-                    const decoded = JSON.parse(decodeURIComponent(escape(atob(fullData))));
-                    if (Array.isArray(decoded)) {
-                        users = decoded;
-                        localStorage.setItem('users', JSON.stringify(users));
-                        return true;
+                if (totalChunks > 1) {
+                    // Получаем историю сообщений для поиска остальных частей
+                    const historyResult = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?limit=100`);
+                    const historyData = await historyResult.json();
+                    
+                    if (historyData.ok) {
+                        // Ищем части в обратном порядке (новые сначала)
+                        const parts = new Array(totalChunks);
+                        parts[0] = fullData; // Первая часть уже есть
+                        
+                        for (const update of historyData.result.reverse()) {
+                            if (!update.message || !update.message.text) continue;
+                            const msg = update.message.text;
+                            const partMatch = msg.match(/\[BBDB:v\d+\|(\d+)\|(\d+)\]/);
+                            if (partMatch && parseInt(partMatch[1]) === totalChunks) {
+                                const partNum = parseInt(partMatch[2]) - 1;
+                                if (!parts[partNum]) {
+                                    parts[partNum] = msg.replace(partMatch[0], '');
+                                }
+                            }
+                        }
+                        
+                        fullData = parts.join('');
                     }
                 }
+                
+                // Распаковываем
+                const decompressed = decodeURIComponent(escape(atob(fullData)));
+                const data = JSON.parse(decompressed);
+                
+                if (data.users && Array.isArray(data.users)) {
+                    users = data.users;
+                    localStorage.setItem('users', JSON.stringify(users));
+                    pinnedMessageId = messageId.toString();
+                    localStorage.setItem('bb_pinned_msg_id', pinnedMessageId);
+                    return true;
+                }
+                
                 return false;
             } catch (e) {
-                console.error('Load sync error:', e);
+                console.error('Sync from Telegram failed:', e);
                 return false;
             }
         }
@@ -1249,22 +1343,21 @@
         // ==================== ИНИЦИАЛИЗАЦИЯ ====================
         
         document.addEventListener('DOMContentLoaded', async () => {
-            // Сначала пробуем загрузить из Telegram
-            const loadedFromTelegram = await loadUsersFromTelegram();
+            updateConnectionStatus('syncing', 'Синхронизация...');
             
-            // Если не удалось, берем из localStorage
-            if (!loadedFromTelegram) {
+            // Пробуем загрузить из Telegram
+            const telegramLoaded = await syncUsersFromTelegram();
+            
+            if (!telegramLoaded) {
+                // Fallback на localStorage
                 const savedUsers = localStorage.getItem('users');
-                if (savedUsers) {
-                    users = JSON.parse(savedUsers);
-                }
+                if (savedUsers) users = JSON.parse(savedUsers);
             }
             
             const savedMessages = localStorage.getItem('messages');
-            if (savedMessages) {
-                messages = JSON.parse(savedMessages);
-            }
+            if (savedMessages) messages = JSON.parse(savedMessages);
             
+            // Проверяем сессию
             const session = localStorage.getItem('currentSession');
             if (session) {
                 const sessionData = JSON.parse(session);
@@ -1302,6 +1395,7 @@
             document.getElementById('authScreen').style.display = 'flex';
             document.getElementById('chatContainer').classList.remove('active');
             if (pollingInterval) clearInterval(pollingInterval);
+            updateConnectionStatus('offline', 'Офлайн');
         }
 
         function showChatScreen() {
@@ -1334,11 +1428,15 @@
                 if (!data.ok) {
                     console.error('Ошибка отправки:', data);
                     updateConnectionStatus('error', 'Ошибка отправки');
+                    return null;
                 }
+                isOnline = true;
                 return data;
             } catch (error) {
                 console.error('Ошибка сети:', error);
                 updateConnectionStatus('error', 'Нет соединения');
+                isOnline = false;
+                return null;
             }
         }
 
@@ -1349,24 +1447,29 @@
                 const response = await fetch(url);
                 const data = await response.json();
                 
-                if (data.ok && data.result.length > 0) {
-                    data.result.forEach(update => {
-                        if (update.update_id > lastUpdateId) {
-                            lastUpdateId = update.update_id;
-                        }
-                    });
+                if (data.ok) {
+                    isOnline = true;
+                    
+                    if (data.result.length > 0) {
+                        data.result.forEach(update => {
+                            if (update.update_id > lastUpdateId) {
+                                lastUpdateId = update.update_id;
+                            }
+                        });
+                    }
                     return data.result;
                 }
                 return [];
             } catch (error) {
                 console.error('Ошибка получения сообщений:', error);
-                updateConnectionStatus('error', 'Нет соединения');
+                isOnline = false;
                 return [];
             }
         }
 
         function startMessagePolling() {
             loadMessages();
+            updateConnectionStatus('connected', 'В сети');
             
             pollingInterval = setInterval(async () => {
                 if (!currentUser) return;
@@ -1375,11 +1478,8 @@
                 
                 updates.forEach(update => {
                     if (update.message && update.message.text) {
-                        // Проверяем синхронизацию пользователей
-                        if (update.message.text.startsWith('[SYNC_USERS_')) {
-                            loadUsersFromTelegram();
-                            return;
-                        }
+                        // Пропускаем служебные сообщения
+                        if (update.message.text.startsWith('[BBDB:')) return;
                         processTelegramMessage(update.message);
                     }
                 });
@@ -1387,7 +1487,7 @@
         }
 
         function processTelegramMessage(tgMessage) {
-            if (!tgMessage.text || tgMessage.text.startsWith('🔌') || tgMessage.text.startsWith('[')) return;
+            if (!tgMessage.text) return;
             
             const text = tgMessage.text;
             const colonIndex = text.indexOf(':');
@@ -1479,30 +1579,42 @@
             const inviteCode = document.getElementById('inviteCode').value.trim();
             const username = document.getElementById('regUsername').value.trim();
             const password = document.getElementById('regPassword').value;
+            const btn = document.getElementById('registerBtn');
             
             hideError();
             hideSuccess();
+            btn.disabled = true;
+            btn.textContent = 'Синхронизация...';
+            updateConnectionStatus('syncing', 'Синхронизация...');
             
-            // Перезагружаем базу перед регистрацией
-            await loadUsersFromTelegram();
+            // Обязательно синхронизируем перед проверкой
+            await syncUsersFromTelegram();
             
             if (inviteCode !== INVITE_CODE) {
                 showError('Неверный инвайт-код. Обратись к админу для получения кода.');
+                btn.disabled = false;
+                btn.textContent = 'Создать аккаунт';
                 return;
             }
             
             if (!username || !password) {
                 showError('Заполни все поля');
+                btn.disabled = false;
+                btn.textContent = 'Создать аккаунт';
                 return;
             }
             
             if (password.length < 4) {
                 showError('Пароль минимум 4 символа');
+                btn.disabled = false;
+                btn.textContent = 'Создать аккаунт';
                 return;
             }
             
             if (users.find(u => u.username === username)) {
                 showError('Такое имя уже занято');
+                btn.disabled = false;
+                btn.textContent = 'Создать аккаунт';
                 return;
             }
             
@@ -1523,31 +1635,52 @@
             localStorage.setItem('users', JSON.stringify(users));
             
             // Синхронизируем с Telegram
-            await syncUsersToTelegram();
+            btn.textContent = 'Сохранение...';
+            const synced = await syncUsersToTelegram();
             
             currentUser = newUser;
             userSettings = newUser.settings;
             
             localStorage.setItem('currentSession', JSON.stringify({ userId: newUser.id }));
             
-            await sendTelegramMessage(`👋 <b>${username}</b> присоединился к чату!`);
+            // Отправляем в Telegram
+            const tgResult = await sendTelegramMessage(`👋 <b>${username}</b> присоединился к чату!`);
             
-            showSuccess('Аккаунт создан! Входим...');
-            setTimeout(() => {
-                showChatScreen();
-            }, 1000);
+            btn.disabled = false;
+            btn.textContent = 'Создать аккаунт';
+            
+            if (synced || tgResult) {
+                showSuccess('Аккаунт создан! Входим...');
+                setTimeout(() => showChatScreen(), 1000);
+            } else {
+                showSuccess('Аккаунт создан (офлайн режим)');
+                setTimeout(() => showChatScreen(), 1000);
+            }
         }
 
         async function login() {
             const username = document.getElementById('loginUsername').value.trim();
             const password = document.getElementById('loginPassword').value;
+            const btn = document.getElementById('loginBtn');
             
             hideError();
+            btn.disabled = true;
+            btn.textContent = 'Синхронизация...';
+            updateConnectionStatus('syncing', 'Синхронизация...');
             
-            // Перезагружаем базу пользователей перед входом
-            await loadUsersFromTelegram();
+            // Обязательно синхронизируем перед входом
+            const synced = await syncUsersFromTelegram();
+            
+            // Если не удалось синхронизироваться, используем локальные данные
+            if (!synced) {
+                const savedUsers = localStorage.getItem('users');
+                if (savedUsers) users = JSON.parse(savedUsers);
+            }
             
             const user = users.find(u => u.username === username && u.password === password);
+            
+            btn.disabled = false;
+            btn.textContent = 'Войти в чат';
             
             if (!user) {
                 showError('Неверное имя или пароль');
@@ -1582,13 +1715,9 @@
             const telegramText = `${currentUser.username}: ${text}`;
             const result = await sendTelegramMessage(telegramText);
             
-            if (!result || !result.ok) {
-                showError('Не удалось отправить сообщение');
-                return;
-            }
-            
+            // Добавляем локально даже если не удалось отправить в Telegram
             const message = {
-                id: result.result.message_id.toString(),
+                id: result ? result.result.message_id.toString() : Date.now().toString(),
                 userId: currentUser.id,
                 username: currentUser.username,
                 avatar: currentUser.avatar,
@@ -1712,7 +1841,7 @@
             if (userIndex !== -1) {
                 users[userIndex].settings = userSettings;
                 localStorage.setItem('users', JSON.stringify(users));
-                // Синхронизируем изменения
+                // Синхронизируем с Telegram
                 await syncUsersToTelegram();
             }
             
@@ -1895,7 +2024,7 @@
             if (userIndex !== -1) {
                 users[userIndex] = currentUser;
                 localStorage.setItem('users', JSON.stringify(users));
-                // Синхронизируем изменения
+                // Синхронизируем с Telegram
                 await syncUsersToTelegram();
             }
             
@@ -1934,8 +2063,7 @@
             
             users = users.filter(u => u.id !== currentUser.id);
             localStorage.setItem('users', JSON.stringify(users));
-            
-            // Синхронизируем изменения
+            // Синхронизируем с Telegram
             await syncUsersToTelegram();
             
             messages = messages.filter(m => m.userId !== currentUser.id);
